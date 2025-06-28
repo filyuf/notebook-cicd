@@ -2,8 +2,7 @@ name: CI/CD SageMaker Notebook
 
 on:
   push:
-    paths:
-      - 'notebooks/train_model.ipynb'
+    branches: [main]
 
 jobs:
   deploy-notebook:
