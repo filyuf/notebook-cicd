@@ -286,21 +286,73 @@ jobs:
             echo "✅ Instance creation started with lifecycle config"
             ;;
           "Stopped")
-            echo "🔄 Starting notebook instance..."
+            echo "🔄 Starting stopped instance..."
             aws sagemaker start-notebook-instance \
               --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
-            echo "✅ Start command sent"
+            echo "✅ Start command sent for stopped instance"
             ;;
           "InService")
             echo "✅ Instance is already running"
-            # Update lifecycle config on running instance
+            echo "🔄 Restarting to apply latest lifecycle configuration..."
+            
+            # Stop the instance first
+            aws sagemaker stop-notebook-instance \
+              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
+            echo "🛑 Stop command sent"
+            
+            # Wait for it to stop
+            echo "⏳ Waiting for instance to stop..."
+            for i in {1..10}; do
+              STATUS=$(aws sagemaker describe-notebook-instance \
+                --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
+                --query 'NotebookInstanceStatus' --output text)
+              
+              if [ "$STATUS" = "Stopped" ]; then
+                echo "✅ Instance stopped successfully"
+                break
+              else
+                echo "⏳ Stopping... Status: $STATUS (attempt $i/10)"
+                sleep 30
+              fi
+            done
+            
+            # Update lifecycle config and start
             echo "🔄 Updating lifecycle configuration..."
             aws sagemaker update-notebook-instance \
               --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-              --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }} || true
+              --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }}
+            
+            echo "🚀 Starting instance with updated lifecycle config..."
+            aws sagemaker start-notebook-instance \
+              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
+            echo "✅ Restart command sent"
+            ;;
+          "Stopping"|"Starting"|"Updating")
+            echo "⏳ Instance is in transition state: $INSTANCE_STATUS"
+            echo "⏳ Waiting for stable state..."
+            sleep 60
+            
+            # Check again after waiting
+            NEW_STATUS=$(aws sagemaker describe-notebook-instance \
+              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
+              --query 'NotebookInstanceStatus' --output text)
+            
+            if [ "$NEW_STATUS" = "Stopped" ]; then
+              echo "🚀 Starting instance..."
+              aws sagemaker start-notebook-instance \
+                --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
+              echo "✅ Start command sent after waiting"
+            elif [ "$NEW_STATUS" = "InService" ]; then
+              echo "✅ Instance is now running"
+            else
+              echo "⚠️ Instance still in transition: $NEW_STATUS"
+            fi
             ;;
           *)
-            echo "⚠️ Instance status: $INSTANCE_STATUS"
+            echo "⚠️ Unexpected instance status: $INSTANCE_STATUS"
+            echo "🔄 Attempting to start anyway..."
+            aws sagemaker start-notebook-instance \
+              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} || true
             ;;
         esac
         
