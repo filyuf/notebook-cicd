@@ -1,35 +1,58 @@
-name: Deploy to SageMaker Notebook
+name: CI/CD SageMaker Notebook
 
 on:
   push:
-    branches: [main]
+    paths:
+      - 'notebooks/train_model.ipynb'
 
 jobs:
-  convert-and-upload:
+  deploy-notebook:
     runs-on: ubuntu-latest
 
+    env:            
+      S3_BUCKET: order-567                        
+      INSTANCE_NAME: testing           
+      LOCAL_NOTEBOOK_PATH: notebooks/train_model.ipynb
+      S3_NOTEBOOK_PATH: notebooks/train_model.ipynb
+
     steps:
-    - name: Checkout source code
-      uses: actions/checkout@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Setup AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
+      - name: Upload Notebook to S3
+        run: |
+          echo "Upload $LOCAL_NOTEBOOK_PATH ke S3..."
+          aws s3 cp $LOCAL_NOTEBOOK_PATH s3://$S3_BUCKET/$S3_NOTEBOOK_PATH
+          echo "✅ Sukses upload"
 
-    - name: Convert .py to .ipynb
-      run: |
-        jupytext --to notebook test.py
+      - name: Start SageMaker Notebook Instance
+        run: |
+          echo "Menyalakan instance SageMaker..."
+          aws sagemaker start-notebook-instance --notebook-instance-name $INSTANCE_NAME
 
-    - name: Upload notebook to S3
-      env:
-        AWS_REGION: ${{ secrets.AWS_REGION }}
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-      run: |
-        aws s3 cp test.ipynb s3://order-567/notebooks/test.ipynb
+      - name: Wait Until Notebook Ready
+        run: |
+          echo "Menunggu notebook instance siap..."
+          for i in {1..30}; do
+            STATUS=$(aws sagemaker describe-notebook-instance \
+              --notebook-instance-name $INSTANCE_NAME \
+              --query 'NotebookInstanceStatus' \
+              --output text)
+
+            echo "Status sekarang: $STATUS"
+
+            if [[ "$STATUS" == "InService" ]]; then
+              echo "✅ Notebook siap!"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "❌ Gagal: Notebook tidak siap dalam 10 menit"
+          exit 1

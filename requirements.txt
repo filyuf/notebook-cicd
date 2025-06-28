@@ -1,5 +1,7 @@
+pandas
+numpy
+matplotlib
+scikit-learn
 xgboost
 boto3
 joblib
-jupytext
-scikit-learn
