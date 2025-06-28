@@ -35,23 +35,7 @@ jobs:
 
       - name: 🛠️ Create lifecycle configuration script
         run: |
-          cat <<EOF > lifecycle.sh
-#!/bin/bash
-set -e
-NOTEBOOK_DIR=/home/ec2-user/SageMaker/notebooks
-mkdir -p "\$NOTEBOOK_DIR"
-
-# Download files from S3
-aws s3 cp s3://${S3_BUCKET}/${S3_NOTEBOOK_KEY} "\$NOTEBOOK_DIR/notebook.ipynb"
-aws s3 cp s3://${S3_BUCKET}/${S3_REQUIREMENTS_KEY} "\$NOTEBOOK_DIR/requirements.txt"
-
-# Install dependencies
-pip install -r "\$NOTEBOOK_DIR/requirements.txt"
-pip install papermill
-
-# Execute notebook
-papermill "\$NOTEBOOK_DIR/notebook.ipynb" "\$NOTEBOOK_DIR/output.ipynb"
-EOF
+          printf '#!/bin/bash\nset -e\nNOTEBOOK_DIR=/home/ec2-user/SageMaker/notebooks\nmkdir -p "$NOTEBOOK_DIR"\naws s3 cp s3://${S3_BUCKET}/${S3_NOTEBOOK_KEY} "$NOTEBOOK_DIR/notebook.ipynb"\naws s3 cp s3://${S3_BUCKET}/${S3_REQUIREMENTS_KEY} "$NOTEBOOK_DIR/requirements.txt"\npip install -r "$NOTEBOOK_DIR/requirements.txt"\npip install papermill\npapermill "$NOTEBOOK_DIR/notebook.ipynb" "$NOTEBOOK_DIR/output.ipynb"\n' > lifecycle.sh
 
       - name: 🧬 Create or update lifecycle configuration in SageMaker
         run: |
