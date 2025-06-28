@@ -7,10 +7,12 @@ on:
 env:
   AWS_REGION: us-east-1
   S3_BUCKET: order-567
-  S3_NOTEBOOK_KEY: notebooks/notebook.ipynb
-  S3_REQUIREMENTS_KEY: notebooks/requirements.txt
   INSTANCE_NAME: test
   LIFECYCLE_CONFIG_NAME: auto-deploy-config
+  LOCAL_NOTEBOOK: notebook.ipynb
+  LOCAL_REQUIREMENTS: requirements.txt
+  S3_NOTEBOOK_KEY: notebooks/notebook.ipynb
+  S3_REQUIREMENTS_KEY: notebooks/requirements.txt
 
 jobs:
   deploy:
@@ -30,25 +32,51 @@ jobs:
 
       - name: ☁️ Upload notebook & requirements.txt to S3
         run: |
-          aws s3 cp train_model.ipynb s3://${S3_BUCKET}/${S3_NOTEBOOK_KEY}
-          aws s3 cp requirements.txt s3://${S3_BUCKET}/${S3_REQUIREMENTS_KEY}
+          echo "📁 Mengunggah file ke S3..."
+          aws s3 cp "$LOCAL_NOTEBOOK" "s3://${S3_BUCKET}/${S3_NOTEBOOK_KEY}"
+          aws s3 cp "$LOCAL_REQUIREMENTS" "s3://${S3_BUCKET}/${S3_REQUIREMENTS_KEY}"
 
-      - name: 🛠️ Create lifecycle configuration script
+      - name: 🛠️ Buat lifecycle config script
         run: |
-          printf '#!/bin/bash\nset -e\nNOTEBOOK_DIR=/home/ec2-user/SageMaker/notebooks\nmkdir -p "$NOTEBOOK_DIR"\naws s3 cp s3://${S3_BUCKET}/${S3_NOTEBOOK_KEY} "$NOTEBOOK_DIR/notebook.ipynb"\naws s3 cp s3://${S3_BUCKET}/${S3_REQUIREMENTS_KEY} "$NOTEBOOK_DIR/requirements.txt"\npip install -r "$NOTEBOOK_DIR/requirements.txt"\npip install papermill\npapermill "$NOTEBOOK_DIR/notebook.ipynb" "$NOTEBOOK_DIR/output.ipynb"\n' > lifecycle.sh
+          cat > lifecycle.sh << 'EOF'
+#!/bin/bash
+set -e
 
-      - name: 🧬 Create or update lifecycle configuration in SageMaker
+S3_BUCKET=order-567
+NOTEBOOK_DIR=/home/ec2-user/SageMaker/notebooks
+mkdir -p "$NOTEBOOK_DIR"
+
+echo "📥 Mengambil notebook dan requirements dari S3..."
+aws s3 cp s3://$S3_BUCKET/notebooks/notebook.ipynb "$NOTEBOOK_DIR/notebook.ipynb"
+aws s3 cp s3://$S3_BUCKET/notebooks/requirements.txt "$NOTEBOOK_DIR/requirements.txt"
+
+echo "📦 Menginstal dependencies..."
+pip install -r "$NOTEBOOK_DIR/requirements.txt"
+pip install papermill
+
+echo "🚀 Menjalankan notebook..."
+papermill "$NOTEBOOK_DIR/notebook.ipynb" "$NOTEBOOK_DIR/output.ipynb"
+
+echo "☁️ Mengunggah output ke S3..."
+aws s3 cp "$NOTEBOOK_DIR/output.ipynb" s3://$S3_BUCKET/output/output.ipynb || echo "Gagal upload output"
+EOF
+
+      - name: 🔐 Encode lifecycle script ke base64 dan buat lifecycle config
         run: |
-          BASE64_SCRIPT=$(base64 -w 0 lifecycle.sh)
+          BASE64_SCRIPT=$(base64 -w 0 lifecycle.sh || base64 lifecycle.sh)
+
+          echo "🧬 Membuat lifecycle config (atau lanjut jika sudah ada)..."
           aws sagemaker create-notebook-instance-lifecycle-config \
-            --notebook-instance-lifecycle-config-name $LIFECYCLE_CONFIG_NAME \
-            --on-start Content="$BASE64_SCRIPT" || echo "⚠️ Lifecycle config exists, updating..."
+            --notebook-instance-lifecycle-config-name "$LIFECYCLE_CONFIG_NAME" \
+            --on-start '[{"Content":"'"$BASE64_SCRIPT"'"}]' || echo "⚠️ Sudah ada"
 
+          echo "🔗 Mengaitkan lifecycle config ke instance..."
           aws sagemaker update-notebook-instance \
-            --notebook-instance-name $INSTANCE_NAME \
-            --notebook-instance-lifecycle-config-name $LIFECYCLE_CONFIG_NAME
+            --notebook-instance-name "$INSTANCE_NAME" \
+            --notebook-instance-lifecycle-config-name "$LIFECYCLE_CONFIG_NAME"
 
-      - name: 🚀 Start the notebook instance
+      - name: 🚀 Menyalakan notebook instance
         run: |
+          echo "🚀 Menyalakan instance SageMaker..."
           aws sagemaker start-notebook-instance \
-            --notebook-instance-name $INSTANCE_NAME
+            --notebook-instance-name "$INSTANCE_NAME"
