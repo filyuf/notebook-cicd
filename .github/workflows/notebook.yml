@@ -8,37 +8,40 @@ jobs:
   deploy-notebook:
     runs-on: ubuntu-latest
 
-    env:            
-      S3_BUCKET: order-567                        
-      INSTANCE_NAME: testing           
+    env:
+      AWS_REGION: us-east-1                
+      S3_BUCKET: order-567                      
+      INSTANCE_NAME: testing                  
       LOCAL_NOTEBOOK_PATH: notebooks/train_model.ipynb
       S3_NOTEBOOK_PATH: notebooks/train_model.ipynb
 
     steps:
-      - name: Checkout Repository
+      - name: ✅ Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Setup AWS Credentials
+      - name: 🔐 Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload Notebook to S3
+      - name: 📤 Upload Notebook to S3
         run: |
-          echo "Upload $LOCAL_NOTEBOOK_PATH ke S3..."
+          echo "📁 Upload $LOCAL_NOTEBOOK_PATH ke s3://$S3_BUCKET/$S3_NOTEBOOK_PATH..."
           aws s3 cp $LOCAL_NOTEBOOK_PATH s3://$S3_BUCKET/$S3_NOTEBOOK_PATH
-          echo "✅ Sukses upload"
+          echo "✅ Upload sukses"
 
-      - name: Start SageMaker Notebook Instance
+      - name: 🚀 Start SageMaker Notebook Instance
         run: |
-          echo "Menyalakan instance SageMaker..."
+          echo "🚀 Menyalakan SageMaker Notebook Instance: $INSTANCE_NAME..."
           aws sagemaker start-notebook-instance --notebook-instance-name $INSTANCE_NAME
+          echo "⌛ Tunggu instance menyala..."
 
-      - name: Wait Until Notebook Ready
+      - name: ⏳ Wait Until Notebook Ready
         run: |
-          echo "Menunggu notebook instance siap..."
+          echo "🔍 Mengecek status instance..."
           for i in {1..30}; do
             STATUS=$(aws sagemaker describe-notebook-instance \
               --notebook-instance-name $INSTANCE_NAME \
@@ -48,7 +51,7 @@ jobs:
             echo "Status sekarang: $STATUS"
 
             if [[ "$STATUS" == "InService" ]]; then
-              echo "✅ Notebook siap!"
+              echo "✅ Notebook siap dijalankan!"
               exit 0
             fi
             sleep 20
