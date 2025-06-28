@@ -8,7 +8,7 @@ env:
   AWS_REGION: us-east-1
   S3_BUCKET: order-567
   CSV_FILE: Students.csv
-  NOTEBOOK_INSTANCE_NAME: testing
+  NOTEBOOK_INSTANCE_NAME: test
   LIFECYCLE_CONFIG_NAME: auto-sync-lifecycle
 
 jobs:
@@ -261,96 +261,273 @@ jobs:
         
         echo "✅ Lifecycle configuration ready!"
         
-    - name: 🖥️ Manage SageMaker Instance
+    - name: 🚀 Force Start/Restart Instance
       run: |
-        echo "Managing SageMaker notebook instance..."
+        echo "🚀 Ensuring SageMaker instance is running with latest config..."
         
-        # Get current status
         INSTANCE_STATUS=$(aws sagemaker describe-notebook-instance \
           --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
           --query 'NotebookInstanceStatus' --output text 2>/dev/null || echo "NotFound")
         
-        echo "Current status: $INSTANCE_STATUS"
+        echo "📊 Current instance status: $INSTANCE_STATUS"
+        
+        if [ "$INSTANCE_STATUS" = "InService" ]; then
+          echo "🔄 Instance is running - performing restart to apply lifecycle config..."
+          
+          aws sagemaker stop-notebook-instance \
+            --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
+          echo "🛑 Stop command sent"
+          
+          # Wait for stop
+          for i in {1..15}; do
+            STATUS=$(aws sagemaker describe-notebook-instance \
+              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
+              --query 'NotebookInstanceStatus' --output text)
+            
+            if [ "$STATUS" = "Stopped" ]; then
+              echo "✅ Instance stopped - ready to restart"
+              break
+            else
+              echo "⏳ Stopping... ($i/15) Status: $STATUS"
+              sleep 20
+            fi
+          done
+        
+    - name: ✅ Verify Lifecycle Configuration
+      run: |
+        echo "🔍 Verifying lifecycle configuration is properly applied..."
+        
+        INSTANCE_INFO=$(aws sagemaker describe-notebook-instance \
+          --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }})
+        
+        CURRENT_STATUS=$(echo "$INSTANCE_INFO" | jq -r '.NotebookInstanceStatus')
+        APPLIED_LIFECYCLE=$(echo "$INSTANCE_INFO" | jq -r '.NotebookInstanceLifecycleConfigName // "None"')
+        
+        echo "📊 Final Status: $CURRENT_STATUS"
+        echo "🔄 Applied Lifecycle: $APPLIED_LIFECYCLE"
+        echo "🎯 Expected Lifecycle: ${{ env.LIFECYCLE_CONFIG_NAME }}"
+        
+        if [ "$APPLIED_LIFECYCLE" = "${{ env.LIFECYCLE_CONFIG_NAME }}" ]; then
+          echo "✅ Lifecycle configuration successfully applied!"
+        else
+          echo "❌ Lifecycle configuration not applied correctly"
+          echo "⚠️ This might cause auto-sync issues"
+        fi
+        
+        # Test lifecycle config exists
+        if aws sagemaker describe-notebook-instance-lifecycle-config \
+           --notebook-instance-lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }} > /dev/null 2>&1; then
+          echo "✅ Lifecycle configuration exists in AWS"
+        else
+          echo "❌ Lifecycle configuration not found in AWS"
+        fi
+        fi
+        
+        # Update lifecycle config
+        echo "🔄 Applying lifecycle configuration..."
+        aws sagemaker update-notebook-instance \
+          --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
+          --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }} || echo "⚠️ Update config failed (might be okay)"
+        
+        # Start instance
+        echo "🚀 Starting notebook instance..."
+        aws sagemaker start-notebook-instance \
+          --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
+        
+        echo "✅ Start command executed successfully!"
+        echo "⏳ Instance will be ready in a few minutes..."
+        
+    - name: 🔍 Check Current Instance Configuration
+      run: |
+        echo "🔍 Checking current instance configuration..."
+        
+        # Get current status and lifecycle config
+        INSTANCE_INFO=$(aws sagemaker describe-notebook-instance \
+          --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} 2>/dev/null || echo "NotFound")
+        
+        if [ "$INSTANCE_INFO" != "NotFound" ]; then
+          INSTANCE_STATUS=$(echo "$INSTANCE_INFO" | jq -r '.NotebookInstanceStatus')
+          CURRENT_LIFECYCLE=$(echo "$INSTANCE_INFO" | jq -r '.NotebookInstanceLifecycleConfigName // "None"')
+          
+          echo "📊 Current Status: $INSTANCE_STATUS"
+          echo "🔄 Current Lifecycle: $CURRENT_LIFECYCLE"
+          echo "🎯 Target Lifecycle: ${{ env.LIFECYCLE_CONFIG_NAME }}"
+          
+          # Set environment variables for next steps
+          echo "INSTANCE_STATUS=$INSTANCE_STATUS" >> $GITHUB_ENV
+          echo "CURRENT_LIFECYCLE=$CURRENT_LIFECYCLE" >> $GITHUB_ENV
+          echo "LIFECYCLE_NEEDS_UPDATE=false" >> $GITHUB_ENV
+          
+          if [ "$CURRENT_LIFECYCLE" != "${{ env.LIFECYCLE_CONFIG_NAME }}" ]; then
+            echo "⚠️ Lifecycle configuration needs to be updated!"
+            echo "LIFECYCLE_NEEDS_UPDATE=true" >> $GITHUB_ENV
+          fi
+        else
+          echo "❌ Instance not found - will create new one"
+          echo "INSTANCE_STATUS=NotFound" >> $GITHUB_ENV
+          echo "LIFECYCLE_NEEDS_UPDATE=false" >> $GITHUB_ENV
+        fi
+        
+    - name: 🖥️ Manage SageMaker Instance
+      run: |
+        echo "Managing SageMaker notebook instance..."
+        echo "📊 Instance Status: $INSTANCE_STATUS"
+        echo "🔄 Lifecycle Update Needed: $LIFECYCLE_NEEDS_UPDATE"
         
         case $INSTANCE_STATUS in
           "NotFound")
-            echo "❌ Notebook instance '${{ env.NOTEBOOK_INSTANCE_NAME }}' not found"
-            echo "ℹ️ Creating new instance with lifecycle configuration..."
+            echo "🆕 Creating new instance with lifecycle configuration..."
+            
+            # Get SageMaker execution role
+            ROLE_ARN=$(aws iam list-roles --query 'Roles[?contains(RoleName, `SageMaker`) && contains(AssumeRolePolicyDocument.Statement[0].Principal.Service, `sagemaker`)].Arn' --output text | head -1)
+            
+            if [ -z "$ROLE_ARN" ]; then
+              echo "❌ SageMaker execution role not found!"
+              echo "💡 Creating basic SageMaker execution role..."
+              
+              # Create role if it doesn't exist
+              aws iam create-role \
+                --role-name SageMakerExecutionRole \
+                --assume-role-policy-document '{
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Principal": {
+                        "Service": "sagemaker.amazonaws.com"
+                      },
+                      "Action": "sts:AssumeRole"
+                    }
+                  ]
+                }' || true
+              
+              # Attach required policies
+              aws iam attach-role-policy \
+                --role-name SageMakerExecutionRole \
+                --policy-arn arn:aws:iam::aws:policy/AmazonSageMakerFullAccess || true
+              
+              aws iam attach-role-policy \
+                --role-name SageMakerExecutionRole \
+                --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess || true
+              
+              ROLE_ARN=$(aws iam get-role --role-name SageMakerExecutionRole --query 'Role.Arn' --output text)
+              echo "✅ Role created: $ROLE_ARN"
+              
+              # Wait for role to propagate
+              sleep 30
+            fi
             
             aws sagemaker create-notebook-instance \
               --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
               --instance-type ml.t3.medium \
-              --role-arn $(aws iam get-role --role-name SageMakerExecutionRole --query 'Role.Arn' --output text) \
+              --role-arn "$ROLE_ARN" \
               --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }}
             
             echo "✅ Instance creation started with lifecycle config"
             ;;
+            
           "Stopped")
-            echo "🔄 Starting stopped instance..."
+            if [ "$LIFECYCLE_NEEDS_UPDATE" = "true" ]; then
+              echo "🔄 Updating lifecycle configuration on stopped instance..."
+              aws sagemaker update-notebook-instance \
+                --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
+                --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }}
+              echo "✅ Lifecycle configuration updated"
+            fi
+            
+            echo "🚀 Starting instance..."
             aws sagemaker start-notebook-instance \
               --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
-            echo "✅ Start command sent for stopped instance"
+            echo "✅ Start command sent"
             ;;
+            
           "InService")
-            echo "✅ Instance is already running"
-            echo "🔄 Restarting to apply latest lifecycle configuration..."
+            if [ "$LIFECYCLE_NEEDS_UPDATE" = "true" ]; then
+              echo "🔄 Instance running but needs lifecycle update - performing restart..."
+              
+              # Stop instance
+              aws sagemaker stop-notebook-instance \
+                --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
+              echo "🛑 Stop command sent"
+              
+              # Wait for stop (longer timeout)
+              echo "⏳ Waiting for instance to stop..."
+              for i in {1..20}; do
+                STATUS=$(aws sagemaker describe-notebook-instance \
+                  --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
+                  --query 'NotebookInstanceStatus' --output text)
+                
+                if [ "$STATUS" = "Stopped" ]; then
+                  echo "✅ Instance stopped successfully"
+                  break
+                elif [ "$STATUS" = "Failed" ]; then
+                  echo "❌ Instance failed to stop"
+                  exit 1
+                else
+                  echo "⏳ Stopping... Status: $STATUS (attempt $i/20)"
+                  sleep 30
+                fi
+                
+                if [ $i -eq 20 ]; then
+                  echo "❌ Timeout waiting for instance to stop"
+                  exit 1
+                fi
+              done
+              
+              # Update lifecycle config
+              echo "🔄 Updating lifecycle configuration..."
+              aws sagemaker update-notebook-instance \
+                --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
+                --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }}
+              echo "✅ Lifecycle configuration updated"
+              
+              # Start instance
+              echo "🚀 Starting instance with new lifecycle config..."
+              aws sagemaker start-notebook-instance \
+                --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
+              echo "✅ Restart command sent"
+              
+            else
+              echo "✅ Instance is running with correct lifecycle configuration"
+              echo "ℹ️ No restart needed"
+            fi
+            ;;
             
-            # Stop the instance first
-            aws sagemaker stop-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
-            echo "🛑 Stop command sent"
+          "Stopping"|"Starting"|"Updating")
+            echo "⏳ Instance is in transition state: $INSTANCE_STATUS"
+            echo "⏳ Waiting for stable state..."
             
-            # Wait for it to stop
-            echo "⏳ Waiting for instance to stop..."
-            for i in {1..10}; do
+            # Wait for stable state
+            for i in {1..15}; do
               STATUS=$(aws sagemaker describe-notebook-instance \
                 --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
                 --query 'NotebookInstanceStatus' --output text)
               
-              if [ "$STATUS" = "Stopped" ]; then
-                echo "✅ Instance stopped successfully"
+              if [ "$STATUS" = "Stopped" ] || [ "$STATUS" = "InService" ]; then
+                echo "✅ Instance reached stable state: $STATUS"
                 break
               else
-                echo "⏳ Stopping... Status: $STATUS (attempt $i/10)"
+                echo "⏳ Waiting... Status: $STATUS (attempt $i/15)"
                 sleep 30
               fi
             done
             
-            # Update lifecycle config and start
-            echo "🔄 Updating lifecycle configuration..."
-            aws sagemaker update-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-              --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }}
-            
-            echo "🚀 Starting instance with updated lifecycle config..."
-            aws sagemaker start-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
-            echo "✅ Restart command sent"
-            ;;
-          "Stopping"|"Starting"|"Updating")
-            echo "⏳ Instance is in transition state: $INSTANCE_STATUS"
-            echo "⏳ Waiting for stable state..."
-            sleep 60
-            
-            # Check again after waiting
-            NEW_STATUS=$(aws sagemaker describe-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-              --query 'NotebookInstanceStatus' --output text)
-            
-            if [ "$NEW_STATUS" = "Stopped" ]; then
-              echo "🚀 Starting instance..."
+            # Handle the stable state
+            if [ "$STATUS" = "Stopped" ]; then
+              if [ "$LIFECYCLE_NEEDS_UPDATE" = "true" ]; then
+                aws sagemaker update-notebook-instance \
+                  --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
+                  --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }}
+              fi
               aws sagemaker start-notebook-instance \
                 --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
-              echo "✅ Start command sent after waiting"
-            elif [ "$NEW_STATUS" = "InService" ]; then
-              echo "✅ Instance is now running"
-            else
-              echo "⚠️ Instance still in transition: $NEW_STATUS"
+              echo "✅ Started instance after waiting"
             fi
             ;;
+            
           *)
             echo "⚠️ Unexpected instance status: $INSTANCE_STATUS"
-            echo "🔄 Attempting to start anyway..."
+            echo "🔄 Attempting to handle anyway..."
             aws sagemaker start-notebook-instance \
               --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} || true
             ;;
