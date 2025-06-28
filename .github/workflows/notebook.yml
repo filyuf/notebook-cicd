@@ -12,7 +12,7 @@ jobs:
       AWS_REGION: us-east-1                
       S3_BUCKET: order-567                      
       INSTANCE_NAME: testing                  
-      LOCAL_NOTEBOOK_PATH: notebooks/train_model.ipynb
+      LOCAL_NOTEBOOK_PATH: train_model.ipynb
       S3_NOTEBOOK_PATH: notebooks/train_model.ipynb
 
     steps:
