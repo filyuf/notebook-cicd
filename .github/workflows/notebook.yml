@@ -30,7 +30,7 @@ jobs:
 
       - name: ☁️ Upload notebook & requirements.txt to S3
         run: |
-          aws s3 cp notebook.ipynb s3://${S3_BUCKET}/${S3_NOTEBOOK_KEY}
+          aws s3 cp train_model.ipynb s3://${S3_BUCKET}/${S3_NOTEBOOK_KEY}
           aws s3 cp requirements.txt s3://${S3_BUCKET}/${S3_REQUIREMENTS_KEY}
 
       - name: 🛠️ Create lifecycle configuration script
