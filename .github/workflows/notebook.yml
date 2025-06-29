@@ -3,64 +3,70 @@ name: Full CICD to SageMaker
 on:
   push:
     branches: [main]
+    paths:
+      - '**.ipynb'
+      - 'on-start.sh'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      AWS_DEFAULT_REGION: us-east-1
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
 
-    - name: Upload .ipynb and lifecycle script to S3
+    - name: Upload notebook and lifecycle script to S3
       run: |
         aws s3 cp train_model.ipynb s3://order-567/notebooks/train_model.ipynb
         aws s3 cp on-start.sh s3://order-567/lifecycle/on-start.sh
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-        AWS_DEFAULT_REGION: us-east-1
 
-    - name: Create or update Lifecycle Configuration
+    - name: Base64 encode lifecycle script
       run: |
+        base64 -w 0 on-start.sh > on-start.sh.b64
+
+    - name: Recreate Lifecycle Configuration
+      run: |
+        aws sagemaker delete-notebook-instance-lifecycle-config \
+          --notebook-instance-lifecycle-config-name on-start-copy || echo "No existing config to delete"
+
         cat > lifecycle-config.json <<EOF
         {
           "NotebookInstanceLifecycleConfigName": "on-start-copy",
           "OnStart": [
             {
-              "Content": "$(base64 on-start.sh)"
+              "Content": "$(cat on-start.sh.b64)"
             }
           ]
         }
         EOF
 
-        # Try create, if fail (already exists), skip
         aws sagemaker create-notebook-instance-lifecycle-config \
-          --cli-input-json file://lifecycle-config.json || echo "Lifecycle already exists"
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-        AWS_DEFAULT_REGION: us-east-1
+          --cli-input-json file://lifecycle-config.json
 
-    - name: Attach Lifecycle to Notebook Instance
+    - name: Attach Lifecycle Config to Notebook Instance
       run: |
         aws sagemaker update-notebook-instance \
           --notebook-instance-name ml \
           --lifecycle-config-name on-start-copy
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-        AWS_DEFAULT_REGION: us-east-1
+
+    - name: Wait for instance update to complete
+      run: |
+        while true; do
+          STATUS=$(aws sagemaker describe-notebook-instance --notebook-instance-name ml --query 'NotebookInstanceStatus' --output text)
+          echo "Current status: $STATUS"
+          if [ "$STATUS" = "Stopped" ] || [ "$STATUS" = "InService" ]; then
+            break
+          fi
+          echo "Waiting for instance to finish updating..."
+          sleep 10
+        done
 
     - name: Start Notebook Instance
       run: |
-        aws sagemaker start-notebook-instance \
-          --notebook-instance-name ml
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-        AWS_DEFAULT_REGION: us-east-1
+        aws sagemaker start-notebook-instance --notebook-instance-name ml
