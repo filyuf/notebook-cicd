@@ -1,558 +1,66 @@
-name: Deploy to AWS SageMaker with Lifecycle
+name: Full CICD to SageMaker
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch: # Allow manual trigger
-
-env:
-  AWS_REGION: us-east-1
-  S3_BUCKET: order-567
-  CSV_FILE: Students.csv
-  NOTEBOOK_INSTANCE_NAME: test
-  LIFECYCLE_CONFIG_NAME: auto-sync-lifecycle
+    branches: [main]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
-    steps:
-    - name: 📥 Checkout Repository
-      uses: actions/checkout@v4
-      
-    - name: 🔐 Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-        aws-region: ${{ env.AWS_REGION }}
-        
-    - name: 🐍 Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
-        
-    - name: ✅ Verify AWS Connection
-      run: |
-        echo "Testing AWS connection..."
-        aws sts get-caller-identity
-        
-    - name: 🔍 Validate S3 Resources
-      run: |
-        echo "Checking S3 bucket accessibility..."
-        aws s3 ls s3://${{ env.S3_BUCKET }}/ || {
-          echo "❌ Cannot access S3 bucket"
-          exit 1
-        }
-        
-        # Check if CSV exists (optional check)
-        if aws s3 ls s3://${{ env.S3_BUCKET }}/${{ env.CSV_FILE }} > /dev/null 2>&1; then
-          echo "✅ CSV file found: s3://${{ env.S3_BUCKET }}/${{ env.CSV_FILE }}"
-        else
-          echo "⚠️ CSV file not found - will need to be uploaded manually"
-        fi
-        
-    - name: 📤 Upload Project Files to S3
-      run: |
-        echo "Uploading project files to S3..."
-        
-        # Upload .ipynb files
-        if find . -name "*.ipynb" -type f | head -1 | grep -q .; then
-          echo "📓 Uploading Jupyter notebooks..."
-          aws s3 sync . s3://${{ env.S3_BUCKET }}/notebooks/ \
-            --exclude "*" --include "*.ipynb" --delete
-          echo "✅ Notebook files uploaded"
-        else
-          echo "⚠️ No .ipynb files found in repository"
-        fi
-        
-        # Upload Python scripts
-        if find . -name "*.py" -type f | head -1 | grep -q .; then
-          echo "🐍 Uploading Python scripts..."
-          aws s3 sync . s3://${{ env.S3_BUCKET }}/scripts/ \
-            --exclude "*" --include "*.py" --delete
-          echo "✅ Python files uploaded"
-        fi
-        
-        # Upload requirements.txt
-        if [ -f "requirements.txt" ]; then
-          echo "📦 Uploading requirements.txt..."
-          aws s3 cp requirements.txt s3://${{ env.S3_BUCKET }}/requirements.txt
-          echo "✅ Requirements file uploaded"
-        fi
-        
-        # Upload any data files
-        if find . -name "*.csv" -type f | head -1 | grep -q .; then
-          echo "📊 Uploading CSV files..."
-          aws s3 sync . s3://${{ env.S3_BUCKET }}/data/ \
-            --exclude "*" --include "*.csv"
-          echo "✅ CSV files uploaded"
-        fi
 
-    - name: 🔄 Create/Update Lifecycle Configuration
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Upload .ipynb and lifecycle script to S3
       run: |
-        echo "Creating enhanced lifecycle configuration..."
-        
-        # Create the OnStart script
-        cat > on-start.sh << 'EOF'
-        #!/bin/bash
-        
-        set -e
-        
-        # Function to log with timestamp
-        log() {
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-        }
-        
-        log "🚀 Starting SageMaker OnStart lifecycle script..."
-        
-        # Wait for instance to be fully ready
-        sleep 30
-        
-        # Set up environment variables
-        export AWS_DEFAULT_REGION=us-east-1
-        export S3_BUCKET=order-567
-        export LOCAL_PATH=/home/ec2-user/SageMaker
-        
-        # Create directory structure
-        log "📁 Setting up directory structure..."
-        mkdir -p $LOCAL_PATH/{notebooks,scripts,data,models,outputs}
-        
-        # Install packages from requirements.txt
-        log "📦 Installing packages from requirements.txt..."
-        if aws s3 ls s3://$S3_BUCKET/requirements.txt > /dev/null 2>&1; then
-            aws s3 cp s3://$S3_BUCKET/requirements.txt /tmp/requirements.txt
-            /home/ec2-user/anaconda3/envs/python3/bin/pip install -r /tmp/requirements.txt
-            log "✅ Packages installed from requirements.txt"
-        else
-            log "⚠️ No requirements.txt found, installing default packages..."
-            /home/ec2-user/anaconda3/envs/python3/bin/pip install --upgrade \
-                pandas numpy matplotlib seaborn scikit-learn xgboost joblib plotly boto3
-        fi
-        
-        # Sync project files from S3
-        log "🔄 Syncing notebooks from S3..."
-        aws s3 sync s3://$S3_BUCKET/notebooks/ $LOCAL_PATH/notebooks/ --delete || true
-        
-        log "🔄 Syncing scripts from S3..."
-        aws s3 sync s3://$S3_BUCKET/scripts/ $LOCAL_PATH/scripts/ --delete || true
-        
-        log "🔄 Syncing data files from S3..."
-        aws s3 sync s3://$S3_BUCKET/data/ $LOCAL_PATH/data/ || true
-        
-        # Download main CSV file if it exists
-        if aws s3 ls s3://$S3_BUCKET/Students.csv > /dev/null 2>&1; then
-            log "📊 Downloading Students.csv..."
-            aws s3 cp s3://$S3_BUCKET/Students.csv $LOCAL_PATH/data/
-        fi
-        
-        # Set proper permissions
-        log "🔐 Setting file permissions..."
-        chown -R ec2-user:ec2-user $LOCAL_PATH/
-        find $LOCAL_PATH -name "*.ipynb" -exec chmod 644 {} + 2>/dev/null || true
-        find $LOCAL_PATH -name "*.py" -exec chmod 755 {} + 2>/dev/null || true
-        
-        # Create environment info notebook
-        log "📝 Creating environment info notebook..."
-        cat > $LOCAL_PATH/00-Environment-Info.ipynb << 'ENV_EOF'
+        aws s3 cp train_model.ipynb s3://order-567/notebooks/train_model.ipynb
+        aws s3 cp on-start.sh s3://order-567/lifecycle/on-start.sh
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        AWS_DEFAULT_REGION: us-east-1
+
+    - name: Create or update Lifecycle Configuration
+      run: |
+        cat > lifecycle-config.json <<EOF
         {
-         "cells": [
-          {
-           "cell_type": "markdown",
-           "metadata": {},
-           "source": [
-            "# 🎉 SageMaker Environment Ready!\n",
-            "\n",
-            "This notebook was automatically created by the CI/CD pipeline.\n",
-            "\n",
-            "## 📁 Directory Structure\n",
-            "\n",
-            "- **📓 Notebooks**: `/home/ec2-user/SageMaker/notebooks/`\n",
-            "- **🐍 Scripts**: `/home/ec2-user/SageMaker/scripts/`\n",
-            "- **📊 Data**: `/home/ec2-user/SageMaker/data/`\n",
-            "- **🤖 Models**: `/home/ec2-user/SageMaker/models/`\n",
-            "- **📤 Outputs**: `/home/ec2-user/SageMaker/outputs/`\n",
-            "\n",
-            "## 🔄 Sync Commands\n",
-            "\n",
-            "Use these commands to sync with S3 manually if needed."
-           ]
-          },
-          {
-           "cell_type": "code",
-           "execution_count": null,
-           "metadata": {},
-           "outputs": [],
-           "source": [
-            "import os\n",
-            "import subprocess\n",
-            "import pandas as pd\n",
-            "import numpy as np\n",
-            "import matplotlib.pyplot as plt\n",
-            "import seaborn as sns\n",
-            "from datetime import datetime\n",
-            "\n",
-            "print(f\"🕐 Environment loaded at: {datetime.now()}\")\n",
-            "print(f\"📁 Working directory: {os.getcwd()}\")\n",
-            "print(f\"🐍 Python version: {os.sys.version}\")\n",
-            "\n",
-            "# List available files\n",
-            "print(\"\\n📂 Available files:\")\n",
-            "for root, dirs, files in os.walk('/home/ec2-user/SageMaker'):\n",
-            "    level = root.replace('/home/ec2-user/SageMaker', '').count(os.sep)\n",
-            "    indent = ' ' * 2 * level\n",
-            "    print(f\"{indent}{os.path.basename(root)}/\")\n",
-            "    subindent = ' ' * 2 * (level + 1)\n",
-            "    for file in files[:5]:  # Show first 5 files\n",
-            "        print(f\"{subindent}{file}\")\n",
-            "    if len(files) > 5:\n",
-            "        print(f\"{subindent}... and {len(files)-5} more files\")"
-           ]
-          },
-          {
-           "cell_type": "code",
-           "execution_count": null,
-           "metadata": {},
-           "outputs": [],
-           "source": [
-            "# Quick data check\n",
-            "data_files = [f for f in os.listdir('/home/ec2-user/SageMaker/data') if f.endswith('.csv')]\n",
-            "print(f\"📊 Found {len(data_files)} CSV files: {data_files}\")\n",
-            "\n",
-            "if data_files:\n",
-            "    # Load first CSV file\n",
-            "    df = pd.read_csv(f'/home/ec2-user/SageMaker/data/{data_files[0]}')\n",
-            "    print(f\"\\n✅ Loaded {data_files[0]} - Shape: {df.shape}\")\n",
-            "    print(\"\\n🔍 First few rows:\")\n",
-            "    display(df.head())\n",
-            "else:\n",
-            "    print(\"⚠️ No CSV files found in data directory\")"
-           ]
-          },
-          {
-           "cell_type": "code",
-           "execution_count": null,
-           "metadata": {},
-           "outputs": [],
-           "source": [
-            "# Sync function\n",
-            "def sync_from_s3():\n",
-            "    \"\"\"Manually sync files from S3\"\"\"\n",
-            "    commands = [\n",
-            "        ['aws', 's3', 'sync', 's3://order-567/notebooks/', '/home/ec2-user/SageMaker/notebooks/', '--delete'],\n",
-            "        ['aws', 's3', 'sync', 's3://order-567/scripts/', '/home/ec2-user/SageMaker/scripts/', '--delete'],\n",
-            "        ['aws', 's3', 'sync', 's3://order-567/data/', '/home/ec2-user/SageMaker/data/']\n",
-            "    ]\n",
-            "    \n",
-            "    for cmd in commands:\n",
-            "        try:\n",
-            "            result = subprocess.run(cmd, capture_output=True, text=True)\n",
-            "            print(f\"✅ {' '.join(cmd[2:4])}: {'Success' if result.returncode == 0 else 'Warning'}\")\n",
-            "        except Exception as e:\n",
-            "            print(f\"❌ Error: {e}\")\n",
-            "    \n",
-            "    print(\"🔄 Sync completed!\")\n",
-            "\n",
-            "# Uncomment to run sync\n",
-            "# sync_from_s3()"
-           ]
-          }
-         ],
-         "metadata": {
-          "kernelspec": {
-           "display_name": "Python 3",
-           "language": "python",
-           "name": "python3"
-          },
-          "language_info": {
-           "name": "python",
-           "version": "3.9.16"
-          }
-         },
-         "nbformat": 4,
-         "nbformat_minor": 4
+          "NotebookInstanceLifecycleConfigName": "on-start-copy",
+          "OnStart": [
+            {
+              "Content": "$(base64 on-start.sh)"
+            }
+          ]
         }
-        ENV_EOF
-        
-        chown ec2-user:ec2-user $LOCAL_PATH/00-Environment-Info.ipynb
-        
-        # Create sync utility script
-        log "🔧 Creating sync utility script..."
-        cat > $LOCAL_PATH/sync-from-s3.py << 'SYNC_EOF'
-        #!/usr/bin/env python3
-        import subprocess
-        import os
-        import sys
-        from datetime import datetime
-        
-        def run_command(cmd, description):
-            """Run a command and return success status"""
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                if result.returncode == 0:
-                    print(f"✅ {description}: Success")
-                    return True
-                else:
-                    print(f"⚠️ {description}: Warning - {result.stderr.strip()}")
-                    return False
-            except subprocess.TimeoutExpired:
-                print(f"⏱️ {description}: Timeout")
-                return False
-            except Exception as e:
-                print(f"❌ {description}: Error - {e}")
-                return False
-        
-        def sync_files():
-            """Sync latest files from S3"""
-            print(f"🔄 Starting sync at {datetime.now()}")
-            print("-" * 50)
-            
-            # Sync commands
-            commands = [
-                (['aws', 's3', 'sync', 's3://order-567/notebooks/', '/home/ec2-user/SageMaker/notebooks/', '--delete'], 
-                 "Syncing notebooks"),
-                (['aws', 's3', 'sync', 's3://order-567/scripts/', '/home/ec2-user/SageMaker/scripts/', '--delete'], 
-                 "Syncing scripts"),
-                (['aws', 's3', 'sync', 's3://order-567/data/', '/home/ec2-user/SageMaker/data/'], 
-                 "Syncing data files"),
-                (['aws', 's3', 'cp', 's3://order-567/Students.csv', '/home/ec2-user/SageMaker/data/'], 
-                 "Downloading Students.csv")
-            ]
-            
-            success_count = 0
-            for cmd, desc in commands:
-                if run_command(cmd, desc):
-                    success_count += 1
-            
-            print("-" * 50)
-            print(f"🎉 Sync completed! ({success_count}/{len(commands)} successful)")
-            
-            # Set permissions
-            os.system("find /home/ec2-user/SageMaker -name '*.py' -exec chmod +x {} + 2>/dev/null")
-            print("🔐 Permissions updated")
-        
-        if __name__ == "__main__":
-            sync_files()
-        SYNC_EOF
-        
-        chmod +x $LOCAL_PATH/sync-from-s3.py
-        chown ec2-user:ec2-user $LOCAL_PATH/sync-from-s3.py
-        
-        log "✅ Lifecycle script completed successfully!"
-        log "🎯 Files synced to: $LOCAL_PATH"
-        log "📝 Environment notebook: $LOCAL_PATH/00-Environment-Info.ipynb"
-        log "🔧 Sync script: $LOCAL_PATH/sync-from-s3.py"
-        
         EOF
-        
-        # Encode the script in base64
-        ENCODED_SCRIPT=$(base64 -w 0 on-start.sh)
-        
-        # Create or update lifecycle config
-        if aws sagemaker describe-notebook-instance-lifecycle-config \
-           --notebook-instance-lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }} > /dev/null 2>&1; then
-          echo "🔄 Updating existing lifecycle configuration..."
-          aws sagemaker update-notebook-instance-lifecycle-config \
-            --notebook-instance-lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }} \
-            --on-start Content="$ENCODED_SCRIPT"
-        else
-          echo "🆕 Creating new lifecycle configuration..."
-          aws sagemaker create-notebook-instance-lifecycle-config \
-            --notebook-instance-lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }} \
-            --on-start Content="$ENCODED_SCRIPT"
-        fi
-        
-        echo "✅ Lifecycle configuration ready!"
-        
-    - name: 🖥️ Manage SageMaker Instance
+
+        # Try create, if fail (already exists), skip
+        aws sagemaker create-notebook-instance-lifecycle-config \
+          --cli-input-json file://lifecycle-config.json || echo "Lifecycle already exists"
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        AWS_DEFAULT_REGION: us-east-1
+
+    - name: Attach Lifecycle to Notebook Instance
       run: |
-        echo "Managing SageMaker notebook instance..."
-        
-        # Check if instance exists
-        INSTANCE_STATUS=$(aws sagemaker describe-notebook-instance \
-          --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-          --query 'NotebookInstanceStatus' --output text 2>/dev/null || echo "NotFound")
-        
-        echo "📊 Current status: $INSTANCE_STATUS"
-        
-        case $INSTANCE_STATUS in
-          "NotFound")
-            echo "🆕 Creating new SageMaker instance..."
-            
-            # Get or create SageMaker execution role
-            ROLE_ARN=$(aws iam list-roles --query 'Roles[?contains(RoleName, `SageMaker`) && contains(AssumeRolePolicyDocument.Statement[0].Principal.Service, `sagemaker`)].Arn' --output text | head -1)
-            
-            if [ -z "$ROLE_ARN" ]; then
-              echo "Creating SageMaker execution role..."
-              
-              # Create role
-              aws iam create-role \
-                --role-name SageMakerExecutionRole \
-                --assume-role-policy-document '{
-                  "Version": "2012-10-17",
-                  "Statement": [{
-                    "Effect": "Allow",
-                    "Principal": {"Service": "sagemaker.amazonaws.com"},
-                    "Action": "sts:AssumeRole"
-                  }]
-                }' || true
-              
-              # Attach policies
-              aws iam attach-role-policy \
-                --role-name SageMakerExecutionRole \
-                --policy-arn arn:aws:iam::aws:policy/AmazonSageMakerFullAccess || true
-                
-              aws iam attach-role-policy \
-                --role-name SageMakerExecutionRole \
-                --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess || true
-              
-              ROLE_ARN=$(aws iam get-role --role-name SageMakerExecutionRole --query 'Role.Arn' --output text)
-              sleep 30  # Wait for role propagation
-            fi
-            
-            # Create instance
-            aws sagemaker create-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-              --instance-type ml.t3.medium \
-              --role-arn "$ROLE_ARN" \
-              --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }}
-            
-            echo "✅ Instance creation initiated"
-            ;;
-            
-          "Stopped")
-            echo "🔄 Updating and starting stopped instance..."
-            aws sagemaker update-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-              --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }} || true
-            
-            aws sagemaker start-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
-            echo "✅ Instance start initiated"
-            ;;
-            
-          "InService")
-            echo "🔄 Restarting running instance to apply updates..."
-            
-            # Stop instance
-            aws sagemaker stop-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
-            
-            # Wait for stop
-            echo "⏳ Waiting for instance to stop..."
-            for i in {1..15}; do
-              STATUS=$(aws sagemaker describe-notebook-instance \
-                --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-                --query 'NotebookInstanceStatus' --output text)
-              
-              if [ "$STATUS" = "Stopped" ]; then
-                echo "✅ Instance stopped"
-                break
-              fi
-              echo "⏳ Stopping... ($i/15)"
-              sleep 30
-            done
-            
-            # Update and restart
-            aws sagemaker update-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-              --lifecycle-config-name ${{ env.LIFECYCLE_CONFIG_NAME }} || true
-            
-            aws sagemaker start-notebook-instance \
-              --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }}
-            echo "✅ Instance restart initiated"
-            ;;
-            
-          *)
-            echo "⏳ Instance in transition: $INSTANCE_STATUS"
-            echo "Waiting for stable state..."
-            sleep 60
-            ;;
-        esac
-        
-    - name: ⏳ Wait for Instance Ready
+        aws sagemaker update-notebook-instance \
+          --notebook-instance-name ml \
+          --lifecycle-config-name on-start-copy
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        AWS_DEFAULT_REGION: us-east-1
+
+    - name: Start Notebook Instance
       run: |
-        echo "Waiting for notebook instance to be ready..."
-        
-        for i in {1..20}; do
-          STATUS=$(aws sagemaker describe-notebook-instance \
-            --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }} \
-            --query 'NotebookInstanceStatus' --output text)
-          
-          if [ "$STATUS" = "InService" ]; then
-            echo "✅ Instance is ready!"
-            break
-          elif [ "$STATUS" = "Failed" ]; then
-            echo "❌ Instance failed to start"
-            exit 1
-          else
-            echo "⏳ Status: $STATUS (wait $i/20)"
-            sleep 45
-          fi
-        done
-        
-    - name: 📋 Deployment Summary
-      run: |
-        # Get instance details
-        INSTANCE_INFO=$(aws sagemaker describe-notebook-instance \
-          --notebook-instance-name ${{ env.NOTEBOOK_INSTANCE_NAME }})
-        
-        NOTEBOOK_URL=$(echo "$INSTANCE_INFO" | jq -r '.Url // "Not available"')
-        INSTANCE_STATUS=$(echo "$INSTANCE_INFO" | jq -r '.NotebookInstanceStatus')
-        LIFECYCLE_CONFIG=$(echo "$INSTANCE_INFO" | jq -r '.NotebookInstanceLifecycleConfigName // "None"')
-        
-        echo "🎯 Deployment Summary:"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "🔗 SageMaker URL: https://$NOTEBOOK_URL"
-        echo "📊 Instance Status: $INSTANCE_STATUS"
-        echo "🔄 Lifecycle Config: $LIFECYCLE_CONFIG"
-        echo "📁 S3 Bucket: s3://${{ env.S3_BUCKET }}/"
-        echo "🌍 Region: ${{ env.AWS_REGION }}"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
-        echo "🚀 Files automatically synced on instance start:"
-        echo "   📓 Notebooks → /home/ec2-user/SageMaker/notebooks/"
-        echo "   🐍 Scripts → /home/ec2-user/SageMaker/scripts/"
-        echo "   📊 Data → /home/ec2-user/SageMaker/data/"
-        echo ""
-        echo "🔧 Manual sync command:"
-        echo "   python3 /home/ec2-user/SageMaker/sync-from-s3.py"
-        
-        # Create GitHub summary
-        cat >> $GITHUB_STEP_SUMMARY << EOF
-        ## 🎯 SageMaker Deployment Complete
-        
-        | Component | Status | Details |
-        |-----------|---------|---------|
-        | 🖥️ SageMaker Instance | ✅ $INSTANCE_STATUS | ${{ env.NOTEBOOK_INSTANCE_NAME }} |
-        | 🔄 Lifecycle Config | ✅ Active | $LIFECYCLE_CONFIG |
-        | 📁 S3 Sync | ✅ Configured | Notebooks, Scripts, Data |
-        | 🌍 Region | ✅ | ${{ env.AWS_REGION }} |
-        
-        ### 🔗 Access Your Environment
-        
-        **SageMaker Notebook:** https://$NOTEBOOK_URL
-        
-        ### 📂 File Structure
-        
-        ```
-        /home/ec2-user/SageMaker/
-        ├── 📓 notebooks/     # Your .ipynb files
-        ├── 🐍 scripts/       # Your .py files  
-        ├── 📊 data/          # CSV and data files
-        ├── 🤖 models/        # For saving models
-        ├── 📤 outputs/       # For results
-        └── 🔧 sync-from-s3.py # Manual sync script
-        ```
-        
-        ### 🔄 Auto-Sync Features
-        
-        - ✅ Installs packages from `requirements.txt`
-        - ✅ Downloads all `.ipynb` files from S3
-        - ✅ Downloads all `.py` files from S3
-        - ✅ Downloads data files from S3
-        - ✅ Creates environment info notebook
-        - ✅ Sets up manual sync utility
-        
-        EOF
+        aws sagemaker start-notebook-instance \
+          --notebook-instance-name ml
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        AWS_DEFAULT_REGION: us-east-1
